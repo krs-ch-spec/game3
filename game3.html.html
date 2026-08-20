@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AR Hand Runner</title>
+    <!-- นำเข้า MediaPipe -->
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #111; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
+        #gameCanvas { position: absolute; top: 0; left: 0; width: 100vw; height: 100vh; z-index: 1; transform: scaleX(-1); /* สลับซ้ายขวาให้เป็นกระจก */ }
+        
+        /* UI Styles */
+        .ui-layer { position: absolute; z-index: 2; color: #FFF; text-shadow: 2px 2px 4px #000; padding: 20px; width: 100%; box-sizing: border-box; pointer-events: none; }
+        .top-bar { display: flex; justify-content: space-between; font-size: 24px; font-weight: bold; }
+        .instructions { position: absolute; bottom: 20px; left: 50%; transform: translateX(-50%); font-size: 18px; text-align: center; background: rgba(0,0,0,0.5); padding: 10px 20px; border-radius: 20px; }
+        
+        #gameOverMenu { display: none; position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); z-index: 3; background: rgba(20, 20, 20, 0.9); padding: 40px; border-radius: 15px; text-align: center; color: white; border: 2px solid #4CAF50; box-shadow: 0 0 20px rgba(76, 175, 80, 0.5); pointer-events: auto; }
+        #gameOverMenu h1 { margin-top: 0; color: #ff4757; }
+        button { background: #4CAF50; color: white; border: none; padding: 15px 30px; font-size: 20px; border-radius: 8px; cursor: pointer; margin-top: 20px; transition: 0.2s; }
+        button:hover { background: #45a049; transform: scale(1.05); }
+    </style>
+</head>
+<body>
+
+    <!-- UI -->
+    <div class="ui-layer top-bar">
+        <div>Distance: <span id="distUI">0</span> m</div>
+        <div>Coins: <span id="coinUI">0</span> 🪙</div>
+    </div>
+    <div class="ui-layer instructions">
+        🖐 เลื่อนมือซ้าย-ขวา | ☝️ ยกมือขึ้นเพื่อกระโดด | 🤏 จีบนิ้วเพื่อสไลด์ลอด
+    </div>
+
+    <!-- Game Over Screen -->
+    <div id="gameOverMenu">
+        <h1>GAME OVER</h1>
+        <h2>Distance: <span id="finalDist">0</span> m</h2>
+        <h2>Coins: <span id="finalCoins">0</span></h2>
+        <button onclick="resetGame()">Play Again</button>
+    </div>
+
+    <!-- Video & Canvas -->
+    <video id="webcam" style="display:none;" autoplay playsinline></video>
+    <canvas id="gameCanvas"></canvas>
+
+    <script>
+        const video = document.getElementById('webcam');
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+
+        // Game State
+        let gameActive = false;
+        let distance = 0;
+        let coinsCollected = 0;
+        let gameSpeed = 0.02; // ความเร็วของวัตถุที่วิ่งเข้ามา
+        let objects = [];
+        
+        // Player State
+        let playerX = 0.5; // ตรงกลาง (0.0 ถึง 1.0)
+        let playerState = 'run'; // run, jump, slide
+
+        // Resize
+        function resize() {
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+        }
+        window.addEventListener('resize', resize);
+        resize();
+
+        // Game Reset
+        function resetGame() {
+            distance = 0;
+            coinsCollected = 0;
+            gameSpeed = 0.02;
+            objects = [];
+            gameActive = true;
+            document.getElementById('gameOverMenu').style.display = 'none';
+            document.getElementById('distUI').innerText = "0";
+            document.getElementById('coinUI').innerText = "0";
+        }
+
+        // Spawn Objects (Obstacles & Coins)
+        function spawnObject() {
+            if (!gameActive) return;
+            
+            const types = [
+                { type: 'coin', color: '#ffd700', isObstacle: false, requiredState: 'any' },
+                { type: 'box', color: '#ff4757', isObstacle: true, requiredState: 'jump' }, // ต้องกระโดดหลบ หรือเบี่ยงหลบ
+                { type: 'wall', color: '#2ed573', isObstacle: true, requiredState: 'slide' } // กำแพงสูง ต้องสไลด์ลอด
+            ];
+            
+            const randType = types[Math.floor(Math.random() * types.length)];
+            const randLane = Math.random(); // 0.1 ถึง 0.9
+            
+            objects.push({
+                xOffset: randLane, // ตำแหน่งเลน
+                progress: 0, // 0 = เส้นขอบฟ้า, 1 = ชนกล้อง
+                ...randType
+            });
+            
+            // เพิ่มความเร็วเกมเรื่อยๆ
+            gameSpeed = Math.min(0.06, gameSpeed + 0.0002);
+            
+            setTimeout(spawnObject, 1000 + Math.random() * 1000);
+        }
+
+        function gameOver() {
+            gameActive = false;
+            document.getElementById('gameOverMenu').style.display = 'block';
+            document.getElementById('finalDist').innerText = Math.floor(distance);
+            document.getElementById('finalCoins').innerText = coinsCollected;
+        }
+
+        // MediaPipe Setup
+        const hands = new Hands({
+            locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
+        });
+        hands.setOptions({
+            maxNumHands: 1,
+            modelComplexity: 1,
+            minDetectionConfidence: 0.7,
+            minTrackingConfidence: 0.7
+        });
+
+        hands.onResults((results) => {
+            // วาดภาพวิดีโอเป็นพื้นหลัง
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            if (results.image) {
+                ctx.drawImage(results.image, 0, 0, canvas.width, canvas.height);
+            }
+
+            if (!gameActive) return;
+
+            distance += gameSpeed * 10;
+            document.getElementById('distUI').innerText = Math.floor(distance);
+
+            // Hand Control Logic
+            if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+                const hand = results.multiHandLandmarks[0];
+                
+                // ใช้จุดที่ 9 (โคนนิ้วกลาง) สำหรับคุมแกน X
+                playerX = hand[9].x; 
+
+                // ตรวจจับท่าทาง
+                const thumb = hand[4];
+                const index = hand[8];
+                const pinchDist = Math.hypot(thumb.x - index.x, thumb.y - index.y);
+
+                if (hand[9].y < 0.3) {
+                    playerState = 'jump'; // ยกมือขึ้นสูง
+                } else if (pinchDist < 0.05) {
+                    playerState = 'slide'; // จีบนิ้ว/กำมือ
+                } else {
+                    playerState = 'run';
+                }
+                
+                // วาดตำแหน่งมือ (UI Indicator)
+                ctx.beginPath();
+                ctx.arc(playerX * canvas.width, hand[9].y * canvas.height, 20, 0, Math.PI*2);
+                ctx.fillStyle = playerState === 'jump' ? 'cyan' : (playerState === 'slide' ? 'magenta' : 'rgba(255,255,255,0.5)');
+                ctx.fill();
+            }
+
+            // Pseudo-3D Perspective Math
+            const horizonY = canvas.height * 0.4;
+            const playerScreenY = canvas.height * 0.85;
+
+            // วาดเส้นถนนจำลอง
+            ctx.beginPath();
+            ctx.moveTo(canvas.width * 0.5, horizonY);
+            ctx.lineTo(0, canvas.height);
+            ctx.moveTo(canvas.width * 0.5, horizonY);
+            ctx.lineTo(canvas.width, canvas.height);
+            ctx.strokeStyle = 'rgba(255, 255, 255, 0.2)';
+            ctx.lineWidth = 2;
+            ctx.stroke();
+
+            // Update & Draw Objects
+            for (let i = objects.length - 1; i >= 0; i--) {
+                let obj = objects[i];
+                obj.progress += gameSpeed;
+
+                // คำนวณตำแหน่งและขนาดแบบ 3D
+                const currentY = horizonY + (playerScreenY - horizonY) * obj.progress;
+                const widthSpread = canvas.width * obj.progress; 
+                const currentX = (canvas.width / 2) - (widthSpread / 2) + (widthSpread * obj.xOffset);
+                const size = 10 + (100 * obj.progress); // ขยายร่างเมื่อใกล้เข้ามา
+
+                // วาดวัตถุ
+                ctx.fillStyle = obj.color;
+                if (obj.type === 'coin') {
+                    ctx.beginPath();
+                    ctx.arc(currentX, currentY - size/2, size/2, 0, Math.PI*2);
+                    ctx.fill();
+                } else if (obj.type === 'wall') {
+                    // กำแพงสูงลอยอยู่
+                    ctx.fillRect(currentX - size/2, currentY - size*2, size, size*1.5);
+                } else {
+                    // กล่องปกติ
+                    ctx.fillRect(currentX - size/2, currentY - size, size, size);
+                }
+
+                // Collision Detection (เมื่อวัตถุเข้ามาใกล้ตัว)
+                if (obj.progress > 0.9 && obj.progress < 1.1) {
+                    // เช็คว่าตำแหน่ง X ตรงกันไหม (ระยะห่าง)
+                    const playerPixelX = playerX * canvas.width;
+                    const isHittingX = Math.abs(currentX - playerPixelX) < size;
+
+                    if (isHittingX) {
+                        if (!obj.isObstacle) {
+                            // เก็บเหรียญ
+                            coinsCollected++;
+                            document.getElementById('coinUI').innerText = coinsCollected;
+                            objects.splice(i, 1);
+                        } else {
+                            // เช็คสิ่งกีดขวาง
+                            if (obj.type === 'box' && playerState !== 'jump') {
+                                gameOver();
+                            } else if (obj.type === 'wall' && playerState !== 'slide') {
+                                gameOver();
+                            }
+                        }
+                    }
+                }
+
+                // ลบวัตถุที่เลยกล้องไปแล้ว
+                if (obj.progress > 1.2) {
+                    objects.splice(i, 1);
+                }
+            }
+        });
+
+        // Start Camera
+        const camera = new Camera(video, {
+            onFrame: async () => {
+                await hands.send({image: video});
+            },
+            width: 640,
+            height: 480
+        });
+        
+        camera.start().then(() => {
+            // เริ่มเกมเมื่อกล้องพร้อม
+            resetGame();
+            spawnObject();
+        });
+
+    </script>
+</body>
+</html>
